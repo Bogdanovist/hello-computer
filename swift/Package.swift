@@ -9,13 +9,19 @@ let package = Package(
     ],
     products: [
         .executable(name: "VoxDaemon", targets: ["VoxDaemon"]),
+        .library(name: "VoxCore", targets: ["VoxCore"]),
         .library(name: "CorrectionObserver", targets: ["CorrectionObserver"]),
         .library(name: "HotkeyListener", targets: ["HotkeyListener"]),
     ],
     targets: [
+        .target(
+            name: "VoxCore",
+            path: "Sources/VoxCore"
+        ),
         .executableTarget(
             name: "VoxDaemon",
             dependencies: [
+                "VoxCore",
                 "CorrectionObserver",
                 "HotkeyListener",
             ],
@@ -39,6 +45,7 @@ let package = Package(
         .testTarget(
             name: "VoxTests",
             dependencies: [
+                "VoxCore",
                 "CorrectionObserver",
                 "HotkeyListener",
             ],

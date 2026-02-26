@@ -10,19 +10,22 @@ import ApplicationServices
 
 /// Injects text at the active cursor position using CGEvent keystroke injection.
 /// Maintains a FIFO queue of InjectionContexts for correction observation.
-final class TextInjector {
+public final class TextInjector {
 
     // MARK: - Properties
 
     /// FIFO queue of injection contexts for correction observation.
-    private(set) var contextQueue: [InjectionContext] = []
+    public private(set) var contextQueue: [InjectionContext] = []
 
     /// Correction window duration in seconds.
-    let correctionWindowSeconds: TimeInterval
+    public let correctionWindowSeconds: TimeInterval
+
+    /// Optional log handler — called with human-readable log messages.
+    public var logHandler: ((String) -> Void)?
 
     // MARK: - Lifecycle
 
-    init(correctionWindowSeconds: Int = 30) {
+    public init(correctionWindowSeconds: Int = 30) {
         self.correctionWindowSeconds = TimeInterval(correctionWindowSeconds)
     }
 
@@ -32,9 +35,9 @@ final class TextInjector {
     /// Creates an InjectionContext and appends it to the queue.
     /// Returns the InjectionContext, or nil if text is empty or injection fails.
     @discardableResult
-    func inject(text: String, appBundleID: String) -> InjectionContext? {
+    public func inject(text: String, appBundleID: String) -> InjectionContext? {
         guard !text.isEmpty else {
-            log(.info, "TextInjector skipping empty text")
+            logHandler?("TextInjector skipping empty text")
             return nil
         }
 
@@ -46,7 +49,7 @@ final class TextInjector {
         // Perform CGEvent keystroke injection
         let success = injectKeystrokes(text)
         guard success else {
-            log(.warning, "TextInjector keystroke injection failed")
+            logHandler?("TextInjector keystroke injection failed")
             return nil
         }
 
@@ -62,7 +65,7 @@ final class TextInjector {
         )
 
         contextQueue.append(context)
-        log(.info, "TextInjector injected \(text.count) chars — \(contextQueue.count) context(s) in queue")
+        logHandler?("TextInjector injected \(text.count) chars — \(contextQueue.count) context(s) in queue")
 
         return context
     }
@@ -70,13 +73,13 @@ final class TextInjector {
     // MARK: - Queue Management
 
     /// Remove all InjectionContexts whose correction window has expired.
-    func purgeExpired() {
+    public func purgeExpired() {
         let now = Date()
         let before = contextQueue.count
         contextQueue.removeAll { $0.correctionWindowExpiry < now }
         let removed = before - contextQueue.count
         if removed > 0 {
-            log(.info, "TextInjector purged \(removed) expired context(s)")
+            logHandler?("TextInjector purged \(removed) expired context(s)")
         }
     }
 
@@ -125,7 +128,7 @@ final class TextInjector {
             &focusedApp
         )
         guard appResult == .success, let appElement = focusedApp else {
-            log(.info, "TextInjector could not get focused application")
+            logHandler?("TextInjector could not get focused application")
             return nil
         }
 
@@ -137,7 +140,7 @@ final class TextInjector {
             &focusedElement
         )
         guard elementResult == .success else {
-            log(.info, "TextInjector could not get focused UI element")
+            logHandler?("TextInjector could not get focused UI element")
             return nil
         }
 

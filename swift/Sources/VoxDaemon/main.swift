@@ -1,4 +1,5 @@
 import Foundation
+import VoxCore
 import CorrectionObserver
 import HotkeyListener
 
@@ -133,6 +134,7 @@ final class DictationCoordinator {
         whisperBridge = bridge
 
         textInjector = TextInjector(correctionWindowSeconds: config.correctionWindowSeconds)
+        textInjector.logHandler = { log(.info, $0) }
 
         correctionObserver = CorrectionObserver(
             correctionWindowSeconds: TimeInterval(config.correctionWindowSeconds),
