@@ -27,7 +27,14 @@ let package = Package(
         ),
         .target(
             name: "HotkeyListener",
+            dependencies: [
+                "CWhisper",
+            ],
             path: "Sources/HotkeyListener"
+        ),
+        .systemLibrary(
+            name: "CWhisper",
+            path: "Sources/CWhisper"
         ),
         .testTarget(
             name: "VoxTests",
