@@ -1,17 +1,18 @@
 .PHONY: build test install clean
 
 build:
-	# TODO: swift build -c release
-	# TODO: cd python && uv sync
-	@echo "build: not yet implemented"
+	swift build -c release
+	cd python && uv sync
 
 test:
+	swift test
 	cd python && uv run pytest
 
 install:
-	# TODO: run scripts/install.sh
-	@echo "install: not yet implemented"
+	scripts/install.sh
 
 clean:
-	# TODO: rm -rf .build/ __pycache__/ *.pyc .venv/
-	@echo "clean: not yet implemented"
+	rm -rf .build/
+	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+	find . -name '*.pyc' -delete 2>/dev/null || true
+	rm -rf python/.venv/
