@@ -28,6 +28,15 @@ def _open_ledger() -> Ledger | None:
         return None
 
 
+def _correction_exists(ledger: Ledger, correction_id: int) -> bool:
+    """Return ``True`` if a correction with *correction_id* exists."""
+    row = ledger.connection.execute(
+        "SELECT 1 FROM corrections WHERE id = ?",
+        (correction_id,),
+    ).fetchone()
+    return row is not None
+
+
 def _format_corrections_table(records: list) -> str:
     """Format a list of :class:`CorrectionRecord` as a table string."""
     header = (
@@ -277,41 +286,118 @@ def search(*, term: str) -> None:
 @click.argument("id", type=int)
 def delete(*, id: int) -> None:
     """Permanently delete a correction."""
-    raise NotImplementedError
+    ledger = _open_ledger()
+    if ledger is None:
+        click.echo(f"Correction #{id} not found.")
+        return
+    try:
+        if not _correction_exists(ledger, id):
+            click.echo(f"Correction #{id} not found.")
+            return
+        ledger.delete_correction(id)
+        click.echo(f"Deleted correction #{id}.")
+    finally:
+        ledger.close()
 
 
 @corrections.command()
 @click.argument("id", type=int)
 def disable(*, id: int) -> None:
     """Disable a correction (excluded from queries, preserved in DB)."""
-    raise NotImplementedError
+    ledger = _open_ledger()
+    if ledger is None:
+        click.echo(f"Correction #{id} not found.")
+        return
+    try:
+        if not _correction_exists(ledger, id):
+            click.echo(f"Correction #{id} not found.")
+            return
+        ledger.disable_correction(id)
+        click.echo(f"Disabled correction #{id}.")
+    finally:
+        ledger.close()
 
 
 @corrections.command()
 @click.argument("id", type=int)
 def enable(*, id: int) -> None:
     """Re-enable a disabled correction."""
-    raise NotImplementedError
+    ledger = _open_ledger()
+    if ledger is None:
+        click.echo(f"Correction #{id} not found.")
+        return
+    try:
+        if not _correction_exists(ledger, id):
+            click.echo(f"Correction #{id} not found.")
+            return
+        ledger.enable_correction(id)
+        click.echo(f"Enabled correction #{id}.")
+    finally:
+        ledger.close()
 
 
 @corrections.command("export")
 def corrections_export() -> None:
     """Export all corrections as JSON to stdout."""
-    raise NotImplementedError
+    ledger = _open_ledger()
+    if ledger is None:
+        click.echo("[]")
+        return
+    try:
+        click.echo(ledger.export_json())
+    finally:
+        ledger.close()
 
 
 @corrections.command("import")
 @click.argument("file", type=click.Path(exists=True))
 def corrections_import(*, file: str) -> None:
     """Import corrections from a JSON file."""
-    raise NotImplementedError
+    try:
+        data = Path(file).read_text(encoding="utf-8")
+    except OSError as exc:
+        click.echo(f"Error reading file: {exc}")
+        return
+
+    try:
+        json.loads(data)
+    except json.JSONDecodeError as exc:
+        click.echo(f"Invalid JSON: {exc}")
+        return
+
+    # Ensure the DB directory exists so the ledger can be created.
+    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ledger = Ledger(_DB_PATH, encryption_key=None)
+    try:
+        count = ledger.import_json(data)
+        click.echo(f"Imported {count} correction(s).")
+    finally:
+        ledger.close()
 
 
 @corrections.command()
 @click.option("--confirm", is_flag=True, help="Required to actually reset.")
 def reset(*, confirm: bool) -> None:
     """Delete all corrections (requires --confirm)."""
-    raise NotImplementedError
+    if not confirm:
+        active, disabled = _get_correction_counts()
+        total = active + disabled
+        click.echo(
+            f"This will delete all {total} corrections. "
+            "Use --confirm to proceed.",
+        )
+        return
+
+    ledger = _open_ledger()
+    if ledger is None:
+        click.echo("No corrections to reset.")
+        return
+    try:
+        backup_path = ledger.reset()
+        click.echo(f"Backup created at {backup_path}")
+        click.echo("All corrections have been deleted.")
+    finally:
+        ledger.close()
 
 
 # ------------------------------------------------------------------
