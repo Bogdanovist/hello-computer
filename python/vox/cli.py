@@ -2,7 +2,60 @@
 
 from __future__ import annotations
 
+import json
+import socket
+import time
+from pathlib import Path
+
 import click
+import requests
+
+from vox.config import load_config
+from vox.ledger import Ledger
+
+_SOCKET_PATH = "/tmp/vox.sock"
+_DB_PATH = Path.home() / ".vox" / "corrections.db"
+_SOCKET_TIMEOUT = 2
+
+
+def _query_daemon_status() -> dict | None:
+    """Connect to the daemon socket and request status.
+
+    Returns the parsed JSON response, or ``None`` when the daemon is
+    unreachable.
+    """
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(_SOCKET_TIMEOUT)
+        sock.connect(_SOCKET_PATH)
+        payload = json.dumps({"type": "control", "action": "status"}) + "\n"
+        sock.sendall(payload.encode("utf-8"))
+        data = sock.recv(4096)
+        sock.close()
+        if data:
+            return json.loads(data.decode("utf-8").strip())
+        return None
+    except (OSError, json.JSONDecodeError, ConnectionRefusedError):
+        return None
+
+
+def _get_correction_counts() -> tuple[int, int]:
+    """Return ``(active, disabled)`` correction counts from the ledger."""
+    if not _DB_PATH.exists():
+        return 0, 0
+    try:
+        ledger = Ledger(_DB_PATH, encryption_key=None)
+        conn = ledger.connection
+        active = conn.execute(
+            "SELECT COUNT(*) FROM corrections WHERE active = 1",
+        ).fetchone()[0]
+        disabled = conn.execute(
+            "SELECT COUNT(*) FROM corrections WHERE active = 0",
+        ).fetchone()[0]
+        ledger.close()
+        return active, disabled
+    except Exception:
+        return 0, 0
 
 
 @click.group()
@@ -18,7 +71,37 @@ def main() -> None:
 @main.command()
 def status() -> None:
     """Show daemon status, model info, and correction statistics."""
-    raise NotImplementedError
+    config = load_config()
+
+    click.echo("Vox Status")
+    click.echo("──────────────────────────")
+
+    daemon_info = _query_daemon_status()
+    if daemon_info is not None:
+        pid = daemon_info.get("pid", "?")
+        click.echo(f"Daemon:       running (pid {pid})")
+        click.echo(f"Uptime:       {daemon_info.get('uptime', '?')}")
+        whisper = daemon_info.get(
+            "whisper_model", config.dictation.whisper_model,
+        )
+        click.echo(f"Whisper:      {whisper} (loaded)")
+        ollama_status = daemon_info.get("ollama_status", "unknown")
+        pp = config.post_processing
+        click.echo(
+            f"Ollama:       {pp.ollama_model}"
+            f" ({ollama_status}, {pp.ollama_host}:{pp.ollama_port})",
+        )
+    else:
+        click.echo("Daemon:       not running")
+
+    active, disabled = _get_correction_counts()
+    suffix = " (from ledger)" if daemon_info is None else ""
+    click.echo(f"Corrections:  {active} active, {disabled} disabled{suffix}")
+
+    if daemon_info is not None:
+        last = daemon_info.get("last_dictation")
+        if last:
+            click.echo(f"Last dictation: {last}")
 
 
 @main.command()
@@ -50,7 +133,68 @@ def test_correction() -> None:
 @main.command("test-ollama")
 def test_ollama() -> None:
     """Verify Ollama endpoint, model, and latency."""
-    raise NotImplementedError
+    config = load_config()
+    pp = config.post_processing
+    host = pp.ollama_host
+    port = pp.ollama_port
+    model = pp.ollama_model
+
+    click.echo("Ollama Status")
+    click.echo("──────────────────────────")
+
+    # 1. Check endpoint reachability.
+    try:
+        resp = requests.get(f"http://{host}:{port}/", timeout=5)
+        resp.raise_for_status()
+        click.echo(f"Endpoint:   {host}:{port} ✓")
+    except requests.ConnectionError:
+        click.echo(f"Endpoint:   {host}:{port} ✗ (not reachable)")
+        return
+    except requests.Timeout:
+        click.echo(f"Endpoint:   {host}:{port} ✗ (timeout)")
+        return
+    except requests.RequestException:
+        click.echo(f"Endpoint:   {host}:{port} ✗ (error)")
+        return
+
+    # 2. Check model availability.
+    try:
+        resp = requests.get(f"http://{host}:{port}/api/tags", timeout=5)
+        resp.raise_for_status()
+        models = resp.json().get("models", [])
+        model_names = [m.get("name", "") for m in models]
+        found = any(
+            model == name or name == f"{model}:latest"
+            for name in model_names
+        )
+        if found:
+            click.echo(f"Model:      {model} ✓ (loaded)")
+        else:
+            click.echo(f"Model:      {model} ✗ (not found)")
+            return
+    except requests.RequestException:
+        click.echo(f"Model:      {model} ✗ (could not query models)")
+        return
+
+    # 3. Send a test prompt and report latency.
+    try:
+        start = time.monotonic()
+        resp = requests.post(
+            f"http://{host}:{port}/api/generate",
+            json={
+                "model": model,
+                "prompt": "Hello",
+                "stream": False,
+                "options": {"temperature": 0, "num_predict": 10},
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        result = resp.json().get("response", "").strip()
+        click.echo(f'Test:       "Hello" → "{result}" ({elapsed_ms}ms)')
+    except requests.RequestException as exc:
+        click.echo(f"Test:       ✗ ({exc})")
 
 
 # ------------------------------------------------------------------
