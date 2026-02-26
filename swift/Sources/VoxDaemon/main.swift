@@ -62,19 +62,43 @@ func checkAccessibilityPermission() {
     // TODO: Call AXIsProcessTrusted() and prompt if false
 }
 
-// MARK: - IPC Server (stub)
+// MARK: - IPC Server
 
-class IPCServerHandle {
-    let socketPath: String
-    init(socketPath: String) {
-        self.socketPath = socketPath
+func startIPCServer(socketPath: String) -> IPCServer {
+    let server = IPCServer(socketPath: socketPath)
+    server.onMessage = { data in
+        handleIPCMessage(data, from: server)
     }
+    do {
+        try server.start()
+    } catch {
+        log(.error, "Failed to start IPC server: \(error)")
+    }
+    return server
 }
 
-func startIPCServer(socketPath: String) -> IPCServerHandle {
-    log(.info, "Starting IPC server at \(socketPath)")
-    // TODO: Create Unix domain socket, listen for Python client
-    return IPCServerHandle(socketPath: socketPath)
+/// Route an incoming IPC message to the appropriate handler.
+private func handleIPCMessage(_ data: Data, from server: IPCServer) {
+    // Peek at the "type" field to determine message kind
+    struct MessageEnvelope: Decodable {
+        let type: IPCMessageType
+    }
+
+    let decoder = JSONDecoder()
+    do {
+        let envelope = try decoder.decode(MessageEnvelope.self, from: data)
+        switch envelope.type {
+        case .inject:
+            let message = try decoder.decode(InjectMessage.self, from: data)
+            log(.info, "IPC received inject message (\(message.text.count) chars)")
+            // TODO: Hand off to TextInjector (T031)
+        case .transcription, .correction:
+            // These are outbound-only (Swift → Python) — unexpected from client
+            log(.warning, "IPC received unexpected message type '\(envelope.type.rawValue)' from client")
+        }
+    } catch {
+        log(.warning, "IPC failed to decode message — skipping")
+    }
 }
 
 // MARK: - Hotkey Listener (stub)
