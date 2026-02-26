@@ -363,3 +363,193 @@ final class CorrectionObserverBehaviorTests: XCTestCase {
         XCTAssertNil(observer.activeSession)
     }
 }
+
+// MARK: - Blocklist Tests
+
+final class BlocklistTests: XCTestCase {
+
+    func testBlocklistBundleIDMatch() {
+        let observer = CorrectionObserver(
+            blocklistBundleIDs: ["com.1password.1password", "com.bitwarden.desktop"],
+            blocklistTitlePatterns: []
+        )
+        XCTAssertFalse(observer.shouldObserve(appBundleID: "com.1password.1password", windowTitle: ""))
+        XCTAssertFalse(observer.shouldObserve(appBundleID: "com.bitwarden.desktop", windowTitle: ""))
+    }
+
+    func testBlocklistTitlePatternMatch() {
+        let observer = CorrectionObserver(
+            blocklistBundleIDs: [],
+            blocklistTitlePatterns: ["password", "secret"]
+        )
+        // Case-insensitive matching
+        XCTAssertFalse(observer.shouldObserve(appBundleID: "com.example.app", windowTitle: "Enter Password"))
+        XCTAssertFalse(observer.shouldObserve(appBundleID: "com.example.app", windowTitle: "PASSWORD FIELD"))
+        XCTAssertFalse(observer.shouldObserve(appBundleID: "com.example.app", windowTitle: "My Secret Notes"))
+    }
+
+    func testBlocklistAllowsNormalApps() {
+        let observer = CorrectionObserver(
+            blocklistBundleIDs: ["com.1password.1password"],
+            blocklistTitlePatterns: ["password"]
+        )
+        XCTAssertTrue(observer.shouldObserve(appBundleID: "com.apple.TextEdit", windowTitle: "Untitled"))
+        XCTAssertTrue(observer.shouldObserve(appBundleID: "com.apple.Notes", windowTitle: "My Notes"))
+    }
+
+    func testBlocklistPreventsSessionCreation() {
+        let observer = CorrectionObserver(
+            blocklistBundleIDs: ["com.1password.1password"],
+            blocklistTitlePatterns: []
+        )
+        let element = NSObject()
+        let expiry = Date().addingTimeInterval(30)
+
+        observer.startObserving(
+            injectedText: "test",
+            appBundleID: "com.1password.1password",
+            axElement: element,
+            correctionWindowExpiry: expiry,
+            windowTitle: ""
+        )
+
+        // No session should be created for blocklisted app
+        XCTAssertNil(observer.activeSession)
+    }
+
+    func testBlocklistTitlePreventsSessionCreation() {
+        let observer = CorrectionObserver(
+            blocklistBundleIDs: [],
+            blocklistTitlePatterns: ["password"]
+        )
+        let element = NSObject()
+        let expiry = Date().addingTimeInterval(30)
+
+        observer.startObserving(
+            injectedText: "test",
+            appBundleID: "com.example.app",
+            axElement: element,
+            correctionWindowExpiry: expiry,
+            windowTitle: "Change Password"
+        )
+
+        XCTAssertNil(observer.activeSession)
+    }
+
+    func testBlocklistLogsWhenSkipped() {
+        let observer = CorrectionObserver(
+            blocklistBundleIDs: ["com.1password.1password"],
+            blocklistTitlePatterns: []
+        )
+        let element = NSObject()
+        let expiry = Date().addingTimeInterval(30)
+
+        var logMessages: [String] = []
+        observer.logHandler = { logMessages.append($0) }
+
+        observer.startObserving(
+            injectedText: "test",
+            appBundleID: "com.1password.1password",
+            axElement: element,
+            correctionWindowExpiry: expiry,
+            windowTitle: ""
+        )
+
+        XCTAssertTrue(logMessages.contains { $0.contains("blocklisted") })
+    }
+}
+
+// MARK: - Browser Detection Tests
+
+final class BrowserDetectionTests: XCTestCase {
+
+    func testChromeDetected() {
+        XCTAssertEqual(
+            CorrectionObserver.selectStrategy(appBundleID: "com.google.Chrome"),
+            .browserHybrid
+        )
+    }
+
+    func testSafariDetected() {
+        XCTAssertEqual(
+            CorrectionObserver.selectStrategy(appBundleID: "com.apple.Safari"),
+            .browserHybrid
+        )
+    }
+
+    func testArcDetected() {
+        XCTAssertEqual(
+            CorrectionObserver.selectStrategy(appBundleID: "company.thebrowser.Browser"),
+            .browserHybrid
+        )
+    }
+
+    func testFirefoxDetected() {
+        XCTAssertEqual(
+            CorrectionObserver.selectStrategy(appBundleID: "org.mozilla.firefox"),
+            .browserHybrid
+        )
+    }
+
+    func testBraveDetected() {
+        XCTAssertEqual(
+            CorrectionObserver.selectStrategy(appBundleID: "com.brave.Browser"),
+            .browserHybrid
+        )
+    }
+
+    func testEdgeDetected() {
+        XCTAssertEqual(
+            CorrectionObserver.selectStrategy(appBundleID: "com.microsoft.edgemac"),
+            .browserHybrid
+        )
+    }
+
+    func testNonBrowserUsesNativeStrategy() {
+        XCTAssertEqual(
+            CorrectionObserver.selectStrategy(appBundleID: "com.apple.TextEdit"),
+            .native
+        )
+        XCTAssertEqual(
+            CorrectionObserver.selectStrategy(appBundleID: "com.apple.Notes"),
+            .native
+        )
+    }
+
+    func testKnownBrowserBundleIDsCount() {
+        // Ensure all 6 browsers are in the set
+        XCTAssertEqual(CorrectionObserver.knownBrowserBundleIDs.count, 6)
+    }
+
+    func testBrowserStrategyInSession() {
+        let observer = CorrectionObserver()
+        let element = NSObject()
+        let expiry = Date().addingTimeInterval(30)
+
+        observer.startObserving(
+            injectedText: "test",
+            appBundleID: "com.google.Chrome",
+            axElement: element,
+            correctionWindowExpiry: expiry
+        )
+
+        XCTAssertNotNil(observer.activeSession)
+        XCTAssertEqual(observer.activeSession?.strategy, .browserHybrid)
+    }
+
+    func testNativeStrategyInSession() {
+        let observer = CorrectionObserver()
+        let element = NSObject()
+        let expiry = Date().addingTimeInterval(30)
+
+        observer.startObserving(
+            injectedText: "test",
+            appBundleID: "com.apple.TextEdit",
+            axElement: element,
+            correctionWindowExpiry: expiry
+        )
+
+        XCTAssertNotNil(observer.activeSession)
+        XCTAssertEqual(observer.activeSession?.strategy, .native)
+    }
+}

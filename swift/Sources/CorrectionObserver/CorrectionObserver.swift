@@ -77,6 +77,12 @@ public struct CorrectionEvent {
 /// kAXValueChangedNotification on the focused element. Uses debounce logic
 /// to wait for the user to finish editing, then computes Levenshtein edit
 /// distance to determine if the change qualifies as a correction.
+///
+/// Supports two observation strategies:
+/// - **Native**: AXValueChanged notifications only (most apps)
+/// - **Browser hybrid**: AXValueChanged + 500ms polling fallback (browsers)
+///
+/// Apps on the blocklist are never observed (zero AX reads, zero polling).
 public final class CorrectionObserver {
 
     // MARK: - Configuration
@@ -93,6 +99,24 @@ public final class CorrectionObserver {
     /// Maximum edit distance ratio to count as a correction (above = rewrite).
     public let maxEditRatio: Double
 
+    /// App bundle IDs where observation is blocked entirely.
+    public let blocklistBundleIDs: Set<String>
+
+    /// Window title substrings (case-insensitive) that block observation.
+    public let blocklistTitlePatterns: [String]
+
+    // MARK: - Browser Detection
+
+    /// Known browser bundle IDs that use the hybrid observation strategy.
+    public static let knownBrowserBundleIDs: Set<String> = [
+        "com.google.Chrome",
+        "com.apple.Safari",
+        "company.thebrowser.Browser",  // Arc
+        "org.mozilla.firefox",
+        "com.brave.Browser",
+        "com.microsoft.edgemac",
+    ]
+
     // MARK: - Callbacks
 
     /// Called when a valid correction is captured.
@@ -106,6 +130,10 @@ public final class CorrectionObserver {
     private var session: ObservationSession?
     private var debounceTimer: DispatchSourceTimer?
     private var windowTimer: DispatchSourceTimer?
+    private var pollingTimer: DispatchSourceTimer?
+    private var modeDecisionTimer: DispatchSourceTimer?
+    private var axValueChangedReceived = false
+    private var lastPolledValue: String?
     #if canImport(ApplicationServices)
     private var axObserver: AXObserver?
     #endif
@@ -116,12 +144,16 @@ public final class CorrectionObserver {
         correctionWindowSeconds: TimeInterval = 30,
         debounceSeconds: TimeInterval = 2,
         minEditRatio: Double = 0.05,
-        maxEditRatio: Double = 0.80
+        maxEditRatio: Double = 0.80,
+        blocklistBundleIDs: Set<String> = [],
+        blocklistTitlePatterns: [String] = []
     ) {
         self.correctionWindowSeconds = correctionWindowSeconds
         self.debounceSeconds = debounceSeconds
         self.minEditRatio = minEditRatio
         self.maxEditRatio = maxEditRatio
+        self.blocklistBundleIDs = blocklistBundleIDs
+        self.blocklistTitlePatterns = blocklistTitlePatterns
     }
 
     deinit {
@@ -135,34 +167,83 @@ public final class CorrectionObserver {
         return session
     }
 
+    /// Check whether observation is allowed for a given app and window.
+    ///
+    /// Returns `false` if the app bundle ID is in the blocklist or if the
+    /// window title matches any blocklist pattern (case-insensitive).
+    /// When this returns `false`: zero AX reads, zero polling, zero content logging.
+    public func shouldObserve(appBundleID: String, windowTitle: String) -> Bool {
+        if blocklistBundleIDs.contains(appBundleID) {
+            return false
+        }
+        for pattern in blocklistTitlePatterns {
+            if windowTitle.localizedCaseInsensitiveContains(pattern) {
+                return false
+            }
+        }
+        return true
+    }
+
+    /// Determine the observation strategy for an app based on its bundle ID.
+    /// Browsers use `.browserHybrid`; all other apps use `.native`.
+    public static func selectStrategy(appBundleID: String) -> ObservationStrategy {
+        if knownBrowserBundleIDs.contains(appBundleID) {
+            return .browserHybrid
+        }
+        return .native
+    }
+
     /// Begin observing a text field for corrections after injection.
     ///
+    /// Checks the blocklist first — if the app or window title is blocked,
+    /// no observation is started. Otherwise, selects the strategy (native
+    /// or browser hybrid) based on the app bundle ID.
+    ///
     /// Cancels any previously active session. On macOS, registers an AXObserver
-    /// for kAXValueChangedNotification on the provided element. On other
-    /// platforms, sets up the session without AX observation.
+    /// for kAXValueChangedNotification on the provided element. For browsers,
+    /// additionally starts a 500ms polling timer with a 5s mode decision window.
+    /// On other platforms, sets up the session without AX observation.
     public func startObserving(
         injectedText: String,
         appBundleID: String,
         axElement: AnyObject,
-        correctionWindowExpiry: Date
+        correctionWindowExpiry: Date,
+        windowTitle: String = ""
     ) {
+        // Blocklist check — zero AX reads, zero polling, zero content logging
+        if !shouldObserve(appBundleID: appBundleID, windowTitle: windowTitle) {
+            logHandler?("Correction observer — app blocklisted, observation skipped")
+            return
+        }
+
         stopObserving()
+
+        let strategy = CorrectionObserver.selectStrategy(appBundleID: appBundleID)
 
         session = ObservationSession(
             injectedText: injectedText,
             injectionTimestamp: Date(),
             appBundleID: appBundleID,
             axElement: axElement,
-            strategy: .native,
+            strategy: strategy,
             latestValue: nil,
             windowExpiry: correctionWindowExpiry
         )
+
+        axValueChangedReceived = false
+        lastPolledValue = nil
 
         #if canImport(ApplicationServices)
         if !setupAXObserver() {
             logHandler?("Correction observer — AX observer setup failed, observation skipped")
             session = nil
             return
+        }
+
+        // Browser hybrid: start polling + mode decision timer
+        if strategy == .browserHybrid {
+            startPollingTimer()
+            startModeDecisionTimer()
         }
         #else
         logHandler?("Correction observer — ApplicationServices not available, AX observation disabled")
@@ -178,7 +259,8 @@ public final class CorrectionObserver {
         windowTimer = timer
         timer.resume()
 
-        logHandler?("Correction observer started — native strategy for \(appBundleID)")
+        let strategyName = strategy == .browserHybrid ? "browser hybrid" : "native"
+        logHandler?("Correction observer started — \(strategyName) strategy for \(appBundleID)")
     }
 
     /// Stop all observation: cancel timers, remove AX observer, clear session.
@@ -186,10 +268,14 @@ public final class CorrectionObserver {
         guard session != nil else { return }
         cancelDebounceTimer()
         cancelWindowTimer()
+        cancelPollingTimer()
+        cancelModeDecisionTimer()
         #if canImport(ApplicationServices)
         removeAXObserver()
         #endif
         session = nil
+        axValueChangedReceived = false
+        lastPolledValue = nil
     }
 
     // MARK: - Value Update (internal for testability)
@@ -265,7 +351,15 @@ public final class CorrectionObserver {
 
     /// Called by the AX observer C callback when the element's value changes.
     fileprivate func handleAXValueChanged(element: AXUIElement) {
-        guard session != nil else { return }
+        guard let currentSession = session else { return }
+
+        // In browser hybrid mode, first AXValueChanged cancels polling
+        if currentSession.strategy == .browserHybrid && !axValueChangedReceived {
+            axValueChangedReceived = true
+            cancelPollingTimer()
+            cancelModeDecisionTimer()
+            logHandler?("Correction observer — AXValueChanged received in browser, switching to native strategy")
+        }
 
         var value: AnyObject?
         let result = AXUIElementCopyAttributeValue(
@@ -279,6 +373,74 @@ public final class CorrectionObserver {
         }
 
         handleValueUpdate(stringValue)
+    }
+    #endif
+
+    // MARK: - Browser Hybrid Polling
+
+    #if canImport(ApplicationServices)
+    /// Start a 500ms repeating polling timer that reads the AX value of the
+    /// focused element. Used in browser hybrid strategy as a fallback when
+    /// AXValueChanged notifications may not fire reliably.
+    private func startPollingTimer() {
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 0.5, repeating: 0.5)
+        timer.setEventHandler { [weak self] in
+            self?.pollAXValue()
+        }
+        pollingTimer = timer
+        timer.resume()
+    }
+
+    /// Read the current AX value of the observed element. If the value has
+    /// changed since the last poll, trigger a value update (which resets
+    /// the debounce timer). If the value is unreadable, cancel observation
+    /// gracefully — dictation still works, only learning is degraded.
+    private func pollAXValue() {
+        guard let currentSession = session,
+              let element = currentSession.axElement as? AXUIElement else { return }
+
+        var value: AnyObject?
+        let result = AXUIElementCopyAttributeValue(
+            element,
+            kAXValueAttribute as CFString,
+            &value
+        )
+
+        if result != .success {
+            logHandler?("AX tree does not expose text content for \(currentSession.appBundleID). Correction capture skipped.")
+            stopObserving()
+            return
+        }
+
+        guard let stringValue = value as? String else { return }
+
+        // Only trigger update if value actually changed since last poll
+        let baseline = lastPolledValue ?? currentSession.injectedText
+        if stringValue != baseline {
+            lastPolledValue = stringValue
+            handleValueUpdate(stringValue)
+        }
+    }
+
+    /// Start the 5-second mode decision timer for browser hybrid strategy.
+    /// If no AXValueChanged fires within 5s, remove the AX observer and
+    /// continue with polling-only for the remainder of the correction window.
+    private func startModeDecisionTimer() {
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 5.0)
+        timer.setEventHandler { [weak self] in
+            self?.handleModeDecision()
+        }
+        modeDecisionTimer = timer
+        timer.resume()
+    }
+
+    private func handleModeDecision() {
+        guard session != nil, !axValueChangedReceived else { return }
+        // No AXValueChanged after 5s — remove AX observer, continue polling
+        removeAXObserver()
+        logHandler?("Correction observer — no AXValueChanged after 5s, continuing with polling only")
     }
     #endif
 
@@ -343,6 +505,16 @@ public final class CorrectionObserver {
     private func cancelWindowTimer() {
         windowTimer?.cancel()
         windowTimer = nil
+    }
+
+    private func cancelPollingTimer() {
+        pollingTimer?.cancel()
+        pollingTimer = nil
+    }
+
+    private func cancelModeDecisionTimer() {
+        modeDecisionTimer?.cancel()
+        modeDecisionTimer = nil
     }
 }
 
