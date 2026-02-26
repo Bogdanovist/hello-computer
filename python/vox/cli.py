@@ -18,6 +18,36 @@ _DB_PATH = Path.home() / ".vox" / "corrections.db"
 _SOCKET_TIMEOUT = 2
 
 
+def _open_ledger() -> Ledger | None:
+    """Open the correction ledger, returning ``None`` if unavailable."""
+    if not _DB_PATH.exists():
+        return None
+    try:
+        return Ledger(_DB_PATH, encryption_key=None)
+    except Exception:
+        return None
+
+
+def _format_corrections_table(records: list) -> str:
+    """Format a list of :class:`CorrectionRecord` as a table string."""
+    header = (
+        f"{'ID':<4}| {'Confidence':<11}| {'Seen':<5}| "
+        f"{'Original':<16}| {'Corrected':<16}| App"
+    )
+    separator = (
+        "────┼────────────┼──────┼"
+        "─────────────────┼─────────────────┼──────────"
+    )
+    lines = [header, separator]
+    for rec in records:
+        app = rec.app_bundle_id if rec.app_bundle_id else "(any)"
+        lines.append(
+            f"{rec.id:<4}| {rec.confidence:<11.2f}| {rec.times_seen:<5}| "
+            f"{rec.injected_text:<16}| {rec.corrected_text:<16}| {app}"
+        )
+    return "\n".join(lines)
+
+
 def _query_daemon_status() -> dict | None:
     """Connect to the daemon socket and request status.
 
@@ -211,14 +241,36 @@ def corrections() -> None:
 @click.option("--app", "app_bundle_id", default=None, help="Filter by app bundle ID.")
 def corrections_list(*, app_bundle_id: str | None) -> None:
     """List active corrections with confidence scores."""
-    raise NotImplementedError
+    ledger = _open_ledger()
+    if ledger is None:
+        click.echo("No corrections recorded yet.")
+        return
+    try:
+        records = ledger.list_corrections(app_bundle_id=app_bundle_id)
+        if not records:
+            click.echo("No corrections recorded yet.")
+            return
+        click.echo(_format_corrections_table(records))
+    finally:
+        ledger.close()
 
 
 @corrections.command()
 @click.argument("term")
 def search(*, term: str) -> None:
     """Search corrections by original or corrected text."""
-    raise NotImplementedError
+    ledger = _open_ledger()
+    if ledger is None:
+        click.echo("No corrections recorded yet.")
+        return
+    try:
+        records = ledger.search_corrections(term)
+        if not records:
+            click.echo("No corrections recorded yet.")
+            return
+        click.echo(_format_corrections_table(records))
+    finally:
+        ledger.close()
 
 
 @corrections.command()
