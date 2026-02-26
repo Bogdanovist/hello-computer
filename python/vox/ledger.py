@@ -316,6 +316,87 @@ class Ledger:
         return [record for _, record in scored[:limit]]
 
     # ------------------------------------------------------------------
+    # CRUD
+    # ------------------------------------------------------------------
+
+    def disable_correction(self, correction_id: int) -> None:
+        """Set a correction's ``active`` flag to 0 (excluded from queries)."""
+        assert self._conn is not None
+        self._conn.execute(
+            "UPDATE corrections SET active = 0 WHERE id = ?",
+            (correction_id,),
+        )
+        self._conn.commit()
+
+    def enable_correction(self, correction_id: int) -> None:
+        """Set a correction's ``active`` flag to 1 (included in queries)."""
+        assert self._conn is not None
+        self._conn.execute(
+            "UPDATE corrections SET active = 1 WHERE id = ?",
+            (correction_id,),
+        )
+        self._conn.commit()
+
+    def delete_correction(self, correction_id: int) -> None:
+        """Permanently remove a correction row from the database."""
+        assert self._conn is not None
+        self._conn.execute(
+            "DELETE FROM corrections WHERE id = ?",
+            (correction_id,),
+        )
+        self._conn.commit()
+
+    def list_corrections(
+        self, app_bundle_id: str | None = None,
+    ) -> list[CorrectionRecord]:
+        """Return all active corrections, optionally filtered by app.
+
+        Parameters
+        ----------
+        app_bundle_id:
+            When provided, only corrections for this bundle ID are returned.
+        """
+        assert self._conn is not None
+
+        if app_bundle_id is not None:
+            cursor = self._conn.execute(
+                "SELECT id, created_at, updated_at, app_bundle_id,"
+                " raw_transcript, injected_text, corrected_text,"
+                " diff_pairs, times_seen, confidence, active"
+                " FROM corrections WHERE active = 1 AND app_bundle_id = ?",
+                (app_bundle_id,),
+            )
+        else:
+            cursor = self._conn.execute(
+                "SELECT id, created_at, updated_at, app_bundle_id,"
+                " raw_transcript, injected_text, corrected_text,"
+                " diff_pairs, times_seen, confidence, active"
+                " FROM corrections WHERE active = 1",
+            )
+
+        return [self._row_to_record(row) for row in cursor.fetchall()]
+
+    def search_corrections(self, term: str) -> list[CorrectionRecord]:
+        """Case-insensitive substring search across text fields.
+
+        Searches ``raw_transcript``, ``injected_text``, and
+        ``corrected_text`` columns.
+        """
+        assert self._conn is not None
+        pattern = f"%{term}%"
+        cursor = self._conn.execute(
+            "SELECT id, created_at, updated_at, app_bundle_id,"
+            " raw_transcript, injected_text, corrected_text,"
+            " diff_pairs, times_seen, confidence, active"
+            " FROM corrections"
+            " WHERE raw_transcript LIKE ? COLLATE NOCASE"
+            "    OR injected_text LIKE ? COLLATE NOCASE"
+            "    OR corrected_text LIKE ? COLLATE NOCASE",
+            (pattern, pattern, pattern),
+        )
+        return [self._row_to_record(row) for row in cursor.fetchall()]
+
+    # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
