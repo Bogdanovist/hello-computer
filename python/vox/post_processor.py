@@ -7,9 +7,11 @@ from typing import TYPE_CHECKING
 
 import requests
 
+from vox.utils import levenshtein_distance
+
 if TYPE_CHECKING:
-    from vox.config import PostProcessingConfig
-    from vox.ledger import CorrectionRecord
+    from vox.config import PostProcessingConfig, VoxConfig
+    from vox.ledger import CorrectionRecord, Ledger
 
 logger = logging.getLogger(__name__)
 
@@ -90,3 +92,59 @@ def call_ollama(
         return None
     except Exception:
         return None
+
+
+def validate_output(
+    raw_transcript: str,
+    llm_output: str | None,
+    config: PostProcessingConfig,
+) -> str:
+    """Validate LLM output. Return cleaned text or fall back to raw transcript.
+
+    Discards the LLM result when:
+    - It is ``None`` or empty (Ollama failure)
+    - The edit distance ratio exceeds the hallucination threshold (default 0.5)
+    """
+    if not llm_output:
+        return raw_transcript
+
+    if not llm_output.strip():
+        return raw_transcript
+
+    edit_dist = levenshtein_distance(raw_transcript, llm_output)
+    max_len = max(len(raw_transcript), len(llm_output))
+    if max_len > 0 and edit_dist / max_len > config.hallucination_threshold:
+        return raw_transcript
+
+    return llm_output
+
+
+def post_process(
+    raw_transcript: str,
+    app_bundle_id: str | None,
+    ledger: Ledger,
+    config: VoxConfig,
+) -> str:
+    """Post-process a raw Whisper transcript using correction history.
+
+    Returns the cleaned text, or *raw_transcript* on any failure or skip.
+    """
+    pp = config.post_processing
+
+    if not pp.enabled:
+        return raw_transcript
+
+    corrections = ledger.query_relevant_corrections(
+        raw_transcript=raw_transcript,
+        app_bundle_id=app_bundle_id,
+        limit=pp.max_correction_pairs_in_prompt,
+        min_confidence=pp.confidence_threshold,
+    )
+
+    if not corrections:
+        return raw_transcript
+
+    prompt = construct_prompt(raw_transcript, corrections)
+    llm_output = call_ollama(prompt, raw_transcript, pp)
+
+    return validate_output(raw_transcript, llm_output, pp)
