@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
+import subprocess
 import time
 from pathlib import Path
 
 import click
 import requests
 
-from vox.config import load_config
+from vox.config import CONFIG_FILE, ensure_config_dir, load_config
 from vox.ledger import Ledger
 
 _SOCKET_PATH = "/tmp/vox.sock"
@@ -97,6 +99,20 @@ def _get_correction_counts() -> tuple[int, int]:
         return 0, 0
 
 
+def _send_daemon_control(message: dict) -> bool:
+    """Send a control message to the daemon. Returns ``True`` if delivered."""
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(_SOCKET_TIMEOUT)
+        sock.connect(_SOCKET_PATH)
+        payload = json.dumps(message) + "\n"
+        sock.sendall(payload.encode("utf-8"))
+        sock.close()
+        return True
+    except (OSError, ConnectionRefusedError):
+        return False
+
+
 @click.group()
 def main() -> None:
     """Vox — self-improving local voice-to-text agent for macOS."""
@@ -144,17 +160,31 @@ def status() -> None:
 
 
 @main.command()
-@click.option("--full", is_flag=True, help="Pause everything (dictation + observation)."
-              )
+@click.option(
+    "--full", is_flag=True,
+    help="Pause everything (dictation + observation).",
+)
 def pause(*, full: bool) -> None:
     """Pause correction observer (or everything with --full)."""
-    raise NotImplementedError
+    scope = "full" if full else "observer"
+    message = {"type": "control", "action": "pause", "scope": scope}
+    if _send_daemon_control(message):
+        if full:
+            click.echo("Paused all Vox processing.")
+        else:
+            click.echo("Paused correction observer.")
+    else:
+        click.echo("Vox daemon is not running. Start it with: vox-daemon")
 
 
 @main.command()
 def resume() -> None:
     """Resume from paused state."""
-    raise NotImplementedError
+    message = {"type": "control", "action": "resume"}
+    if _send_daemon_control(message):
+        click.echo("Resumed Vox processing.")
+    else:
+        click.echo("Vox daemon is not running. Start it with: vox-daemon")
 
 
 @main.command("test-dictation")
@@ -410,14 +440,22 @@ def reset(*, confirm: bool) -> None:
 def config(ctx: click.Context) -> None:
     """View or modify Vox configuration."""
     if ctx.invoked_subcommand is None:
-        raise NotImplementedError
+        ensure_config_dir()
+        editor = os.environ.get("EDITOR", "vi")
+        subprocess.run([editor, str(CONFIG_FILE)], check=False)
 
 
 @config.command("get")
 @click.argument("key")
 def config_get(*, key: str) -> None:
     """Print the value of a config key (dotted notation)."""
-    raise NotImplementedError
+    cfg = load_config()
+    try:
+        value = cfg.get_by_dotted_key(key)
+    except KeyError:
+        click.echo(f"Unknown config key: {key}")
+        raise SystemExit(1) from None
+    click.echo(value)
 
 
 @config.command("set")
@@ -425,4 +463,14 @@ def config_get(*, key: str) -> None:
 @click.argument("value")
 def config_set(*, key: str, value: str) -> None:
     """Set a config value (validates type before writing)."""
-    raise NotImplementedError
+    cfg = load_config()
+    try:
+        cfg.set_by_dotted_key(key, value)
+    except KeyError:
+        click.echo(f"Unknown config key: {key}")
+        raise SystemExit(1) from None
+    except ValueError as exc:
+        click.echo(f"Invalid value for {key}: {exc}")
+        raise SystemExit(1) from None
+    click.echo(f"Set {key}.")
+    _send_daemon_control({"type": "control", "action": "reload_config"})
