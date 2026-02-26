@@ -5,10 +5,12 @@ description = "Self-improving local voice-to-text agent for macOS"
 requires-python = ">=3.12"
 dependencies = [
     "requests",
-    "pysqlcipher3",
     "tomli-w",
     "click",
 ]
+
+[project.optional-dependencies]
+macos = ["pysqlcipher3"]
 
 [project.scripts]
 vox = "vox.cli:main"
