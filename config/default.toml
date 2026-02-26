@@ -1,0 +1,68 @@
+# Vox default configuration
+# Copy to ~/.vox/config.toml to customize.
+# Only settings you want to change need to be present — missing keys use these defaults.
+
+[dictation]
+# Hotkey to activate dictation: "globe", "fn", or a custom key code string
+hotkey = "globe"
+# Whisper model to use: "large-v3-turbo.en" (accuracy) or "base.en" (speed)
+whisper_model = "large-v3-turbo.en"
+# Language code for whisper transcription
+language = "en"
+
+[post_processing]
+# Enable LLM post-processing of transcriptions using correction history
+enabled = true
+# Ollama model name for post-processing
+ollama_model = "qwen3:8b"
+# Ollama server host — must be localhost for security (zero network egress)
+ollama_host = "127.0.0.1"
+# Ollama server port
+ollama_port = 11434
+# Duration to keep model loaded in Ollama after last request
+ollama_keep_alive = "5m"
+# LLM sampling temperature (0 = deterministic)
+temperature = 0
+# Maximum number of correction pairs included in the LLM prompt
+max_correction_pairs_in_prompt = 20
+# Minimum confidence score for a correction to be included in the prompt
+confidence_threshold = 0.5
+# Maximum edit distance ratio (edited chars / total chars) before discarding LLM output as hallucination
+hallucination_threshold = 0.5
+
+[correction_observer]
+# Enable automatic observation of user corrections after dictation
+enabled = true
+# Seconds after injection to watch for user corrections
+correction_window_seconds = 30
+# Seconds of inactivity before capturing the final corrected value
+debounce_seconds = 2
+# Minimum edit distance ratio to count as a real correction (below = noise)
+min_edit_ratio = 0.05
+# Maximum edit distance ratio to count as a correction (above = full rewrite, not a correction)
+max_edit_ratio = 0.80
+# Number of times a correction must be seen before it is auto-applied
+auto_apply_after_n = 3
+
+[security]
+# App bundle IDs where Vox will never read text fields or observe corrections
+blocklist_bundle_ids = [
+    "com.1password.1password",
+    "com.agilebits.onepassword7",
+    "com.apple.keychainaccess",
+    "com.apple.systempreferences",
+    "com.bitwarden.desktop",
+    "com.lastpass.LastPass",
+]
+# Window title patterns (case-insensitive) that trigger the blocklist
+blocklist_title_patterns = [
+    "password", "credential", "secret", "keychain", "ssh", "gpg",
+]
+
+[logging]
+# Log level: "debug", "info", "warn", "error"
+level = "info"
+# Path to log file (~ is expanded to home directory)
+log_file = "~/.vox/vox.log"
+# Transcription content is NEVER written to logs.
+# Only metadata: timestamp, app, latency, correction_captured (bool)
