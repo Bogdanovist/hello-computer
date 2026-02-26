@@ -397,6 +397,138 @@ class Ledger:
         return [self._row_to_record(row) for row in cursor.fetchall()]
 
     # ------------------------------------------------------------------
+    # Export / Import / Reset
+    # ------------------------------------------------------------------
+
+    def export_json(self) -> str:
+        """Export all corrections (active and disabled) as a JSON array.
+
+        The ``id`` field is excluded from the output.  The caller is
+        responsible for securing the exported file.
+        """
+        assert self._conn is not None
+        cursor = self._conn.execute(
+            "SELECT id, created_at, updated_at, app_bundle_id,"
+            " raw_transcript, injected_text, corrected_text,"
+            " diff_pairs, times_seen, confidence, active"
+            " FROM corrections",
+        )
+        records = []
+        for row in cursor.fetchall():
+            record = self._row_to_record(row)
+            records.append({
+                "created_at": record.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                "updated_at": record.updated_at.strftime("%Y-%m-%d %H:%M:%S"),
+                "app_bundle_id": record.app_bundle_id,
+                "raw_transcript": record.raw_transcript,
+                "injected_text": record.injected_text,
+                "corrected_text": record.corrected_text,
+                "diff_pairs": record.diff_pairs,
+                "times_seen": record.times_seen,
+                "confidence": record.confidence,
+                "active": record.active,
+            })
+        return json.dumps(records, ensure_ascii=False, indent=2)
+
+    def import_json(self, data: str) -> int:
+        """Import corrections from a JSON string, merging with existing data.
+
+        Merges by normalised ``diff_pairs``:
+
+        * If a matching entry exists, keep the higher ``times_seen`` and the
+          more recent ``updated_at``.
+        * If no match, insert as a new row.
+
+        Returns the number of corrections processed (inserted or merged).
+        """
+        assert self._conn is not None
+        corrections = json.loads(data)
+        count = 0
+
+        for entry in corrections:
+            diff_pairs = [tuple(pair) for pair in entry["diff_pairs"]]
+            normalized = _normalize_diff_pairs(diff_pairs)
+
+            cursor = self._conn.execute(
+                "SELECT id, times_seen, updated_at FROM corrections"
+                " WHERE diff_pairs_normalized = ?",
+                (normalized,),
+            )
+            existing = cursor.fetchone()
+
+            if existing is not None:
+                existing_id, existing_times_seen, existing_updated_at = existing
+                new_times_seen = max(existing_times_seen, entry["times_seen"])
+                import_updated = entry["updated_at"]
+                new_updated = max(existing_updated_at, import_updated)
+
+                new_confidence = calculate_confidence(
+                    new_times_seen,
+                    datetime.strptime(new_updated, "%Y-%m-%d %H:%M:%S"),
+                )
+                self._conn.execute(
+                    "UPDATE corrections"
+                    " SET times_seen = ?, updated_at = ?, confidence = ?"
+                    " WHERE id = ?",
+                    (new_times_seen, new_updated, new_confidence, existing_id),
+                )
+            else:
+                created_str = entry.get(
+                    "created_at", _now().strftime("%Y-%m-%d %H:%M:%S"),
+                )
+                updated_str = entry.get("updated_at", created_str)
+                confidence = calculate_confidence(
+                    entry.get("times_seen", 1),
+                    datetime.strptime(updated_str, "%Y-%m-%d %H:%M:%S"),
+                )
+                active = 1 if entry.get("active", True) else 0
+                self._conn.execute(
+                    """INSERT INTO corrections
+                       (raw_transcript, injected_text, corrected_text,
+                        diff_pairs, diff_pairs_normalized,
+                        app_bundle_id, times_seen, confidence, active,
+                        created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        entry.get("raw_transcript", entry["injected_text"]),
+                        entry["injected_text"],
+                        entry["corrected_text"],
+                        json.dumps(diff_pairs, ensure_ascii=False),
+                        normalized,
+                        entry.get("app_bundle_id"),
+                        entry.get("times_seen", 1),
+                        confidence,
+                        active,
+                        created_str,
+                        updated_str,
+                    ),
+                )
+            count += 1
+
+        self._conn.commit()
+        return count
+
+    def reset(self) -> Path:
+        """Delete all corrections after creating a JSON backup.
+
+        The backup is written to the same directory as the database file,
+        named ``corrections_backup_{timestamp}.json``.
+
+        Returns the path to the backup file.
+        """
+        backup_dir = self._db_path.parent
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = _now().strftime("%Y%m%d_%H%M%S")
+        backup_path = backup_dir / f"corrections_backup_{timestamp}.json"
+        backup_path.write_text(self.export_json(), encoding="utf-8")
+
+        assert self._conn is not None
+        self._conn.execute("DELETE FROM corrections")
+        self._conn.commit()
+
+        return backup_path
+
+    # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
