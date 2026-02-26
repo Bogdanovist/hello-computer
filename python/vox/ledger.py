@@ -11,6 +11,7 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
 
 try:
@@ -223,6 +224,100 @@ class Ledger:
         )
         self._conn.commit()
         return cursor.lastrowid  # type: ignore[return-value]
+
+    # ------------------------------------------------------------------
+    # Query
+    # ------------------------------------------------------------------
+
+    def _row_to_record(self, row: tuple) -> CorrectionRecord:  # type: ignore[type-arg]
+        """Convert a database row tuple to a :class:`CorrectionRecord`."""
+        return CorrectionRecord(
+            id=row[0],
+            created_at=datetime.strptime(row[1], "%Y-%m-%d %H:%M:%S"),
+            updated_at=datetime.strptime(row[2], "%Y-%m-%d %H:%M:%S"),
+            app_bundle_id=row[3],
+            raw_transcript=row[4],
+            injected_text=row[5],
+            corrected_text=row[6],
+            diff_pairs=json.loads(row[7]),
+            times_seen=row[8],
+            confidence=row[9],
+            active=bool(row[10]),
+        )
+
+    def query_relevant_corrections(
+        self,
+        raw_transcript: str,
+        app_bundle_id: str | None = None,
+        limit: int = 20,
+        min_confidence: float = 0.5,
+    ) -> list[CorrectionRecord]:
+        """Retrieve corrections relevant to *raw_transcript*, ranked by score.
+
+        Ranking is a combined score::
+
+            fuzzy_match * 0.6 + confidence * 0.3 + app_match * 0.1
+
+        Only active corrections whose recalculated confidence is at least
+        *min_confidence* are considered.  Fuzzy matching compares tokenised
+        transcripts using :class:`~difflib.SequenceMatcher` and requires a
+        ratio > 0.6 for inclusion.
+        """
+        assert self._conn is not None
+
+        cursor = self._conn.execute(
+            "SELECT id, created_at, updated_at, app_bundle_id, raw_transcript,"
+            " injected_text, corrected_text, diff_pairs, times_seen,"
+            " confidence, active"
+            " FROM corrections WHERE active = 1",
+        )
+
+        transcript_tokens = raw_transcript.lower().split()
+        if not transcript_tokens:
+            return []
+
+        scored: list[tuple[float, CorrectionRecord]] = []
+
+        for row in cursor.fetchall():
+            record = self._row_to_record(row)
+
+            # Recalculate confidence from current time.
+            current_confidence = get_current_confidence(record)
+            record.confidence = current_confidence
+
+            if current_confidence < min_confidence:
+                continue
+
+            # Fuzzy match: best token-pair ratio across both token sets.
+            stored_tokens = record.raw_transcript.lower().split()
+            best_ratio = 0.0
+            for stored_token in stored_tokens:
+                for transcript_token in transcript_tokens:
+                    ratio = SequenceMatcher(
+                        None, stored_token, transcript_token,
+                    ).ratio()
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+
+            if best_ratio <= 0.6:
+                continue
+
+            # App context boost: 1.0 when bundle IDs match, else 0.0.
+            app_match = (
+                1.0
+                if app_bundle_id and record.app_bundle_id == app_bundle_id
+                else 0.0
+            )
+
+            score = best_ratio * 0.6 + current_confidence * 0.3 + app_match * 0.1
+            scored.append((score, record))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [record for _, record in scored[:limit]]
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
 
     def close(self) -> None:
         """Close the database connection."""
